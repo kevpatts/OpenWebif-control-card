@@ -9,6 +9,16 @@ interface Channel {
   bouquet?: string;
 }
 
+interface Recording {
+  name?: string;
+  channel?: string;
+  length?: string;
+  begin?: string;
+  size?: string;
+  description?: string;
+  serviceref?: string;
+}
+
 interface EpgEvent {
   sref: string;
   sname: string;
@@ -109,8 +119,18 @@ export class OpenWebifControlCard extends LitElement {
   }
 
   protected updated(changed: PropertyValues): void {
-    if (changed.has("hass") || changed.has("_bouquet")) {
+    // Only (re)load EPG when the selected bouquet changes or on first data,
+    // NOT on every hass state push (which happens constantly). This prevents
+    // flooding the receiver with EPG requests.
+    if (changed.has("_bouquet")) {
       this._loadEpg();
+      return;
+    }
+    if (changed.has("hass")) {
+      // First time we have channel data, kick a single load.
+      if (!this._epgBouquetLoaded && this._allChannels().length) {
+        this._loadEpg();
+      }
     }
   }
 
@@ -168,6 +188,14 @@ export class OpenWebifControlCard extends LitElement {
   private _currentSref(): string | undefined {
     const id = this._currentEntityId();
     return id ? this.hass.states[id]?.attributes?.service_reference : undefined;
+  }
+
+  private _recordings(): Recording[] {
+    const id = Object.keys(this.hass.states).find(
+      (i) => i.startsWith("sensor.") && i.endsWith("_recordings")
+    );
+    if (!id || !this.hass.states[id]) return [];
+    return (this.hass.states[id].attributes.recordings as Recording[]) || [];
   }
 
   private _bouquetRefs(): Record<string, string> {
@@ -351,6 +379,13 @@ export class OpenWebifControlCard extends LitElement {
             >
               ★ Favourites
             </button>
+            <button
+              class="tab ${this._bouquet === "__rec__" ? "active" : ""}"
+              @click=${() => (this._bouquet = "__rec__")}
+              title="Recordings"
+            >
+              📼 Recordings
+            </button>
             ${this._bouquets().map(
               (b) => html`<button
                 class="tab ${this._bouquet === b ? "active" : ""}"
@@ -363,6 +398,34 @@ export class OpenWebifControlCard extends LitElement {
           </div>
         </div>
 
+        ${this._bouquet === "__rec__"
+          ? this._renderRecordings()
+          : this._renderGuideBlock(
+              channels,
+              dark,
+              currentSref,
+              rows,
+              hours,
+              slot,
+              windowWidth,
+              nowOffsetPx
+            )}
+        ${this._selected ? this._renderDetail(this._selected) : nothing}
+      </ha-card>
+    `;
+  }
+
+  private _renderGuideBlock(
+    channels: Channel[],
+    dark: boolean,
+    currentSref: string | undefined,
+    rows: number,
+    hours: number,
+    slot: number,
+    windowWidth: number,
+    nowOffsetPx: number
+  ) {
+    return html`
         <div class="timeline-controls">
           <button
             class="nav"
@@ -388,34 +451,79 @@ export class OpenWebifControlCard extends LitElement {
             : nothing}
         </div>
 
-        <div class="guide" style="--rows:${rows}; --row-h:${ROW_HEIGHT}px">
-          <!-- time header -->
-          <div class="time-header" style="width:${windowWidth}px">
-            ${this._timeTicks(hours, slot)}
-          </div>
+        <div
+          class="guide"
+          style="--rows:${rows}; --row-h:${ROW_HEIGHT}px; max-height:${
+            rows * ROW_HEIGHT + 24
+          }px"
+        >
+          <!-- one scroll container: header row + channel rows share the same
+               horizontal + vertical scroll -->
+          <div class="scroller" style="--track-w:${windowWidth}px">
+            <!-- sticky time header, scrolls horizontally with the tracks -->
+            <div class="time-header">
+              <div class="corner"></div>
+              <div class="ticks" style="width:${windowWidth}px">
+                ${this._timeTicks(hours, slot)}
+              </div>
+            </div>
 
-          <!-- scrollable body -->
-          <div class="body" style="max-height:${rows * ROW_HEIGHT}px">
             ${channels.length === 0
               ? html`<div class="empty">
                   ${this._bouquet === "__fav__"
                     ? "No favourites yet — tap the ☆ on a channel to add one."
                     : "No channels."}
                 </div>`
-              : channels.map((c) =>
-                  this._renderRow(c, dark, c.sref === currentSref, windowWidth)
-                )}
-            ${nowOffsetPx >= 0 && nowOffsetPx <= windowWidth
-              ? html`<div
-                  class="nowline"
-                  style="left:calc(var(--chan-w) + ${nowOffsetPx}px)"
-                ></div>`
-              : nothing}
+              : html`<div class="rows">
+                  ${nowOffsetPx >= 0 && nowOffsetPx <= windowWidth
+                    ? html`<div
+                        class="nowline"
+                        style="left:calc(var(--chan-w) + ${nowOffsetPx}px)"
+                      ></div>`
+                    : nothing}
+                  ${channels.map((c) =>
+                    this._renderRow(
+                      c,
+                      dark,
+                      c.sref === currentSref,
+                      windowWidth
+                    )
+                  )}
+                </div>`}
           </div>
         </div>
+    `;
+  }
 
-        ${this._selected ? this._renderDetail(this._selected) : nothing}
-      </ha-card>
+  private _renderRecordings() {
+    const recs = this._recordings();
+    if (!recs.length) {
+      return html`<div class="empty">No recordings found.</div>`;
+    }
+    return html`
+      <div class="rec-grid">
+        ${recs.map(
+          (r: Recording) => html`<div class="rec-card">
+            <div class="rec-title" title=${r.name || ""}>${r.name}</div>
+            <div class="rec-meta">
+              ${[r.channel, r.begin, r.length, r.size]
+                .filter(Boolean)
+                .join(" · ")}
+            </div>
+            ${r.description
+              ? html`<div class="rec-desc">${r.description}</div>`
+              : nothing}
+            <div class="rec-actions">
+              <button
+                @click=${() => r.serviceref && this._zap(r.serviceref)}
+                ?disabled=${!r.serviceref}
+              >
+                ▶ Play on TV
+              </button>
+            </div>
+          </div>`
+        )}
+      </div>
     `;
   }
 
@@ -608,25 +716,44 @@ export class OpenWebifControlCard extends LitElement {
       font-style: italic;
     }
     .guide {
-      overflow-x: auto;
-      overflow-y: hidden;
+      overflow: auto;
+      position: relative;
+    }
+    .scroller {
+      position: relative;
+      width: calc(var(--chan-w) + var(--track-w));
     }
     .time-header {
-      position: relative;
+      display: flex;
+      position: sticky;
+      top: 0;
+      z-index: 5;
       height: 22px;
-      margin-left: var(--chan-w);
+      background: var(--card-background-color, #161b22);
       border-bottom: 1px solid var(--owc-border);
+    }
+    .corner {
+      width: var(--chan-w);
+      min-width: var(--chan-w);
+      position: sticky;
+      left: 0;
+      z-index: 6;
+      background: var(--card-background-color, #161b22);
+      border-right: 1px solid var(--owc-border);
+    }
+    .ticks {
+      position: relative;
+      height: 100%;
     }
     .tick {
       position: absolute;
-      top: 0;
+      top: 4px;
       font-size: 0.7rem;
       color: var(--owc-subtle);
       transform: translateX(-2px);
     }
-    .body {
+    .rows {
       position: relative;
-      overflow-y: auto;
     }
     .row {
       display: flex;
@@ -646,7 +773,8 @@ export class OpenWebifControlCard extends LitElement {
       cursor: pointer;
       position: sticky;
       left: 0;
-      z-index: 2;
+      /* Above the now-line so the line disappears behind the channel column. */
+      z-index: 4;
       background: var(--owc-tile-bg);
       border-right: 1px solid var(--owc-border);
     }
@@ -742,7 +870,8 @@ export class OpenWebifControlCard extends LitElement {
       bottom: 0;
       width: 2px;
       background: var(--owc-accent);
-      z-index: 3;
+      /* Below the sticky channel column (z 4) but above event tiles. */
+      z-index: 1;
       pointer-events: none;
     }
     .detail {
@@ -795,6 +924,58 @@ export class OpenWebifControlCard extends LitElement {
       padding: 24px;
       text-align: center;
       color: var(--owc-subtle);
+    }
+    .rec-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+      gap: 10px;
+      padding: 4px 2px;
+    }
+    .rec-card {
+      border: 1px solid var(--owc-border);
+      border-radius: var(--owc-radius);
+      background: var(--owc-tile-bg);
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .rec-title {
+      font-weight: 600;
+      color: var(--owc-text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .rec-meta {
+      font-size: 0.72rem;
+      color: var(--owc-subtle);
+    }
+    .rec-desc {
+      font-size: 0.8rem;
+      color: var(--owc-subtle);
+      display: -webkit-box;
+      -webkit-line-clamp: 3;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+    .rec-actions {
+      margin-top: auto;
+      display: flex;
+      gap: 8px;
+    }
+    .rec-actions button {
+      padding: 6px 14px;
+      border-radius: 999px;
+      border: none;
+      background: var(--owc-accent);
+      color: var(--text-primary-color, #fff);
+      cursor: pointer;
+      font-size: 0.8rem;
+    }
+    .rec-actions button[disabled] {
+      opacity: 0.5;
+      cursor: default;
     }
     a {
       color: var(--owc-accent);
