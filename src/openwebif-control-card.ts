@@ -64,6 +64,15 @@ export class OpenWebifControlCard extends LitElement {
   @state() private _windowStart = 0; // unix seconds, left edge of timeline
 
   private _epgBouquetLoaded = "";
+  // Cache of grouped EPG per bouquet-key, with a fetch timestamp, so switching
+  // tabs back and forth is instant and doesn't re-hit the box.
+  private _epgCache: Map<
+    string,
+    { at: number; data: Map<string, EpgEvent[]> }
+  > = new Map();
+  // How long a cached EPG stays fresh (ms). EPG windows are short, so a few
+  // minutes keeps it snappy without going stale.
+  private static EPG_TTL_MS = 5 * 60 * 1000;
 
   public setConfig(config: CardConfig): void {
     if (!config) throw new Error("Invalid configuration");
@@ -186,7 +195,16 @@ export class OpenWebifControlCard extends LitElement {
     const refs = this._epgBouquetRefs();
     if (!refs.length || this._loadingEpg) return;
     const key = refs.join("|");
-    if (key === this._epgBouquetLoaded) return;
+
+    // Serve from cache if fresh.
+    const cached = this._epgCache.get(key);
+    if (cached && Date.now() - cached.at < OpenWebifControlCard.EPG_TTL_MS) {
+      this._epg = cached.data;
+      this._epgBouquetLoaded = key;
+      return;
+    }
+    if (key === this._epgBouquetLoaded && this._epg.size) return;
+
     this._loadingEpg = true;
     this._epgBouquetLoaded = key;
     try {
@@ -221,6 +239,7 @@ export class OpenWebifControlCard extends LitElement {
       }
       for (const arr of map.values()) arr.sort((a, b) => a.begin - b.begin);
       this._epg = map;
+      this._epgCache.set(key, { at: Date.now(), data: map });
     } catch (err) {
       console.error("openwebif-control-card: get_epg failed", err);
     } finally {
@@ -257,19 +276,22 @@ export class OpenWebifControlCard extends LitElement {
 
   private _onPiconLoad(e: Event, name: string): void {
     const img = e.target as HTMLImageElement;
+    // Reveal only once a real image has decoded, so the browser's broken-image
+    // glyph never flashes.
+    img.classList.add("loaded");
     if (img.src) rememberResolved(name, img.src);
   }
 
-  private _onPiconError(
-    e: Event,
-    urls: string[],
-    idx: number
-  ): void {
+  private _onPiconError(e: Event, urls: string[], idx: number): void {
     const img = e.target as HTMLImageElement;
     if (idx + 1 < urls.length) {
+      img.dataset.idx = String(idx + 1);
       img.src = urls[idx + 1];
     } else {
+      // All candidates failed: hide the img for good and show the text tile.
       img.classList.add("failed");
+      const logo = img.parentElement;
+      if (logo) logo.classList.add("no-picon");
     }
   }
 
@@ -407,15 +429,16 @@ export class OpenWebifControlCard extends LitElement {
           >
             ${isFav ? "★" : "☆"}
           </button>
-          <div class="chan-logo">
+          <div class="chan-logo ${startUrls.length ? "" : "no-picon"}">
             ${startUrls.length
               ? html`<img
                   src=${startUrls[0]}
+                  data-idx="0"
                   loading="lazy"
-                  alt=${channel.name}
+                  decoding="async"
+                  alt=""
                   @load=${(e: Event) => this._onPiconLoad(e, channel.name)}
-                  @error=${(e: Event) =>
-                    this._onPiconError(e, startUrls, 0)}
+                  @error=${(e: Event) => this._onPiconError(e, startUrls, 0)}
                 />`
               : nothing}
             <span class="chan-fallback">${channel.name}</span>
@@ -638,6 +661,12 @@ export class OpenWebifControlCard extends LitElement {
       max-width: 100%;
       max-height: 100%;
       object-fit: contain;
+      /* Hidden until it successfully decodes, so no broken-image flash. */
+      opacity: 0;
+      transition: opacity 0.15s ease;
+    }
+    .chan-logo img.loaded {
+      opacity: 1;
     }
     .chan-logo img.failed {
       display: none;
@@ -649,8 +678,8 @@ export class OpenWebifControlCard extends LitElement {
       color: var(--owc-text);
       text-align: center;
     }
-    .chan-logo:not(:has(img)) .chan-fallback,
-    .chan-logo:has(img.failed) .chan-fallback {
+    /* Show the text tile only when there is genuinely no picon. */
+    .chan-logo.no-picon .chan-fallback {
       display: block;
     }
     .track {

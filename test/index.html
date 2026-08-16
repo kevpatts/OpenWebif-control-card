@@ -6,24 +6,23 @@
     <style>
       body {
         margin: 0;
-        background: #111418;
+        background: #0d1117;
         font-family: system-ui, sans-serif;
-        /* emulate a few HA theme vars */
-        --card-background-color: #1c2128;
-        --divider-color: rgba(255, 255, 255, 0.08);
-        --primary-color: #03a9f4;
+        --card-background-color: #161b22;
+        --divider-color: rgba(255, 255, 255, 0.09);
+        --primary-color: #2f81f7;
         --primary-text-color: #e6edf3;
         --secondary-text-color: #8b949e;
         --text-primary-color: #fff;
       }
       .wrap {
-        max-width: 900px;
-        margin: 24px auto;
+        max-width: 1100px;
+        margin: 20px auto;
       }
       ha-card {
         display: block;
         background: var(--card-background-color);
-        border-radius: 16px;
+        border-radius: 14px;
       }
     </style>
     <script type="module" src="../dist/openwebif-control-card.js"></script>
@@ -34,38 +33,56 @@
     </div>
     <script type="module">
       const data = await (await fetch("./data.json")).json();
-      const channelsAttr = data.channels;
-      const currentSref = data.current_sref;
 
       const hass = {
         themes: { darkMode: true },
         states: {
           "sensor.duo2_channels": {
-            state: String(channelsAttr.length),
+            state: String(data.channels.length),
             attributes: {
-              channels: channelsAttr,
+              channels: data.channels,
+              bouquet_refs: data.bouquet_refs,
               friendly_name: "Duo² Channels",
             },
           },
           "sensor.duo2_current_programme": {
-            state: "European Athletics",
-            attributes: { service_reference: currentSref },
+            state: "Now",
+            attributes: { service_reference: data.current_sref },
           },
         },
-        callService: async (domain, service, dataArg) => {
+        callService: async (domain, service, dataArg, _t, _n, returnResponse) => {
           console.log("callService", domain, service, dataArg);
-          const el = document.createElement("div");
-          el.textContent = `zap → ${dataArg.service_reference}`;
-          el.style.cssText =
-            "position:fixed;bottom:16px;left:16px;background:#03a9f4;color:#fff;padding:8px 14px;border-radius:8px;font:14px system-ui;z-index:9";
-          document.body.appendChild(el);
-          setTimeout(() => el.remove(), 1500);
+          if (service === "get_epg") {
+            return { response: { events: data.epg_events } };
+          }
+          if (service === "zap") {
+            toast(`Zap → ${dataArg.service_reference}`);
+          }
+          if (service === "add_timer") {
+            toast(`Record → event ${dataArg.event_id}`);
+          }
+          return {};
         },
       };
 
+      function toast(msg) {
+        const el = document.createElement("div");
+        el.textContent = msg;
+        el.style.cssText =
+          "position:fixed;bottom:16px;left:16px;background:#2f81f7;color:#fff;padding:8px 14px;border-radius:8px;font:14px system-ui;z-index:9";
+        document.body.appendChild(el);
+        setTimeout(() => el.remove(), 1500);
+      }
+
       const card = document.getElementById("card");
-      card.setConfig({ type: "openwebif-control-card", title: "TV", columns: 4 });
+      card.setConfig({
+        type: "openwebif-control-card",
+        title: "TV Guide",
+        rows: 8,
+        hours: 3,
+      });
       card.hass = hass;
+      window.__card = card;
     </script>
   </body>
 </html>
