@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>OpenWebif Control Card — test harness</title>
+    <style>
+      body {
+        margin: 0;
+        background: #111418;
+        font-family: system-ui, sans-serif;
+        /* emulate a few HA theme vars */
+        --card-background-color: #1c2128;
+        --divider-color: rgba(255, 255, 255, 0.08);
+        --primary-color: #03a9f4;
+        --primary-text-color: #e6edf3;
+        --secondary-text-color: #8b949e;
+        --text-primary-color: #fff;
+      }
+      .wrap {
+        max-width: 900px;
+        margin: 24px auto;
+      }
+      ha-card {
+        display: block;
+        background: var(--card-background-color);
+        border-radius: 16px;
+      }
+    </style>
+    <script type="module" src="../dist/openwebif-control-card.js"></script>
+  </head>
+  <body>
+    <div class="wrap">
+      <openwebif-control-card id="card"></openwebif-control-card>
+    </div>
+    <script type="module">
+      const data = await (await fetch("./data.json")).json();
+      const channelsAttr = data.channels;
+      const currentSref = data.current_sref;
+
+      const hass = {
+        themes: { darkMode: true },
+        states: {
+          "sensor.duo2_channels": {
+            state: String(channelsAttr.length),
+            attributes: {
+              channels: channelsAttr,
+              friendly_name: "Duo² Channels",
+            },
+          },
+          "sensor.duo2_current_programme": {
+            state: "European Athletics",
+            attributes: { service_reference: currentSref },
+          },
+        },
+        callService: async (domain, service, dataArg) => {
+          console.log("callService", domain, service, dataArg);
+          const el = document.createElement("div");
+          el.textContent = `zap → ${dataArg.service_reference}`;
+          el.style.cssText =
+            "position:fixed;bottom:16px;left:16px;background:#03a9f4;color:#fff;padding:8px 14px;border-radius:8px;font:14px system-ui;z-index:9";
+          document.body.appendChild(el);
+          setTimeout(() => el.remove(), 1500);
+        },
+      };
+
+      const card = document.getElementById("card");
+      card.setConfig({ type: "openwebif-control-card", title: "TV", columns: 4 });
+      card.hass = hass;
+    </script>
+  </body>
+</html>

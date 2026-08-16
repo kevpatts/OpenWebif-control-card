@@ -1,0 +1,58 @@
+// Picon (channel logo) resolver.
+//
+// Channel logos are pulled from the public `picons/picons` repository served
+// via the jsDelivr CDN. We never touch the receiver for logos, so the box
+// needs no picon pack installed.
+//
+// Resolution order for a channel name:
+//   1. Normalise the name (lowercase, ascii, alphanumeric, "+1" -> "plus1").
+//   2. Look it up in the bundled compact map (name -> canonical logo id) that
+//      was generated from the upstream snp.index for common UK/IE channels.
+//   3. If unmapped, try the normalised name directly as a logo id.
+//   4. If the image fails to load, the card falls back to a text tile.
+
+import piconMap from "./picon-map.json";
+
+const CDN_BASE =
+  "https://cdn.jsdelivr.net/gh/picons/picons@master/build-source/logos";
+
+const MAP = piconMap as Record<string, string>;
+
+export function normaliseName(name: string): string {
+  const ascii = name
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "") // strip diacritics
+    .toLowerCase()
+    .replace(/\+1/g, "plus1")
+    .replace(/\+/g, "plus");
+  return ascii.replace(/[^a-z0-9]/g, "");
+}
+
+/**
+ * Resolve a channel name to a candidate logo id.
+ * Returns null when we have no reasonable guess.
+ */
+export function resolveLogoId(name: string): string | null {
+  const key = normaliseName(name);
+  if (!key) return null;
+  if (MAP[key]) return MAP[key];
+  // "+1" timeshift fallback to the base channel.
+  if (key.endsWith("plus1") && MAP[key.slice(0, -5)]) {
+    return MAP[key.slice(0, -5)];
+  }
+  // Last resort: try the normalised name itself as a logo id.
+  return key;
+}
+
+/**
+ * Build the picon URL(s) for a channel, preferring a dark variant in dark mode.
+ * Returns an ordered list of candidate URLs to try.
+ */
+export function piconUrls(name: string, dark: boolean): string[] {
+  const id = resolveLogoId(name);
+  if (!id) return [];
+  const variants = dark
+    ? [".dark.svg", ".default.svg", ".default.png"]
+    : [".default.svg", ".light.svg", ".default.png"];
+  return variants.map((v) => `${CDN_BASE}/${id}${v}`);
+}
