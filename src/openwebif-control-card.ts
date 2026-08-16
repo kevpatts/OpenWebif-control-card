@@ -51,6 +51,17 @@ const DOMAIN = "openwebif_control";
 const PX_PER_MINUTE = 6; // horizontal scale of the timeline
 const ROW_HEIGHT = 56;
 
+// OpenWebif EPG text arrives HTML-encoded (e.g. &#x27; &amp; &quot;). Decode it
+// once for display. A textarea decodes all named/numeric entities safely.
+const _decoder =
+  typeof document !== "undefined" ? document.createElement("textarea") : null;
+function decodeHtml(text: string | undefined): string {
+  if (!text) return "";
+  if (!_decoder) return text;
+  _decoder.innerHTML = text;
+  return _decoder.value;
+}
+
 @customElement("openwebif-control-card")
 export class OpenWebifControlCard extends LitElement {
   @property({ attribute: false }) public hass!: Hass;
@@ -232,6 +243,9 @@ export class OpenWebifControlCard extends LitElement {
           const k = `${e.sref}:${e.begin}`;
           if (seen.has(k)) continue;
           seen.add(k);
+          // Decode HTML entities in display text up front.
+          e.title = decodeHtml(e.title);
+          if (e.shortdesc) e.shortdesc = decodeHtml(e.shortdesc);
           const arr = map.get(e.sref) || [];
           arr.push(e);
           map.set(e.sref, arr);
