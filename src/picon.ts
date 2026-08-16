@@ -18,6 +18,22 @@ const CDN_BASE =
 
 const MAP = piconMap as Record<string, string>;
 
+// Cache of channel-name -> ordered candidate URLs, so repeated renders (e.g.
+// switching tabs) never recompute or re-request. Combined with a module-level
+// cache of which URL actually loaded, logos become instant after first paint.
+const urlCache = new Map<string, string[]>();
+const resolvedCache = new Map<string, string>();
+
+/** Record the URL that successfully loaded for a channel (called by the card). */
+export function rememberResolved(name: string, url: string): void {
+  resolvedCache.set(name, url);
+}
+
+/** Return the previously-successful URL for a channel, if known. */
+export function cachedResolved(name: string): string | undefined {
+  return resolvedCache.get(name);
+}
+
 export function normaliseName(name: string): string {
   const ascii = name
     .normalize("NFKD")
@@ -49,10 +65,19 @@ export function resolveLogoId(name: string): string | null {
  * Returns an ordered list of candidate URLs to try.
  */
 export function piconUrls(name: string, dark: boolean): string[] {
+  const cacheKey = `${dark ? "d" : "l"}:${name}`;
+  const cached = urlCache.get(cacheKey);
+  if (cached) return cached;
+
   const id = resolveLogoId(name);
-  if (!id) return [];
+  if (!id) {
+    urlCache.set(cacheKey, []);
+    return [];
+  }
   const variants = dark
     ? [".dark.svg", ".default.svg", ".default.png"]
     : [".default.svg", ".light.svg", ".default.png"];
-  return variants.map((v) => `${CDN_BASE}/${id}${v}`);
+  const urls = variants.map((v) => `${CDN_BASE}/${id}${v}`);
+  urlCache.set(cacheKey, urls);
+  return urls;
 }

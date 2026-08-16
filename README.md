@@ -10,25 +10,28 @@ This is the **dashboard companion** to the
 The integration provides the data and control entities; this card renders a
 **Sky Q-style channel grid** on top of them.
 
-> **v0.3 — channel grid.** Tap a channel to zap the box. Recordings gallery and
-> a full EPG grid are planned for later releases.
+> **v0.4 — timeline grid.** A Sky Q-style EPG timeline: channels as rows, time
+> across the top. Tap a programme to watch or record. Recordings gallery is
+> planned for a later release.
 
 ---
 
 ## Features
 
-- **Channel grid** across *all* bouquets (FreeSat, Saorview, favourites…),
-  de-duplicated and filtered to real, playable channels.
-- **Tap to zap** — changes the channel on the receiver via the integration's
-  `zap` service.
+- **Timeline EPG grid** — channels as rows, time along the top, with a live
+  "now" line. Scroll horizontally through the guide; step the window earlier/
+  later. Configurable number of visible **rows**.
+- **Tap a programme** to open details, then **Watch** (zap) or **Record**
+  (adds a timer via the integration).
+- **Favourites** — star any channel; a **★ Favourites** tab shows just those.
+  Favourites are stored per-browser (localStorage).
+- **Bouquet tabs** along the top (FreeSat categories, Saorview, etc.).
 - **Channel logos (picons)** resolved automatically from the public
-  [`picons/picons`](https://github.com/picons/picons) set via the jsDelivr CDN —
-  **no picon pack needs to be installed on your box**. Channels without a match
-  fall back to a clean text tile.
-- **HA-native theming** — every colour is driven by your Home Assistant theme's
-  CSS variables, so the card automatically matches light/dark/custom themes.
-  Dark-mode picon variants are used automatically.
-- **Search** and optional **bouquet filter** chips.
+  [`picons/picons`](https://github.com/picons/picons) set via jsDelivr —
+  **no picon pack needs to be installed on your box** — cached after first load
+  so tab switches are instant. Text-tile fallback for unmatched channels.
+- **HA-native theming** — colours come from your Home Assistant theme's CSS
+  variables (light/dark/custom); dark-mode picon variants used automatically.
 - Highlights the **currently-tuned** channel.
 
 ---
@@ -66,8 +69,9 @@ Control Card**), or via YAML:
 
 ```yaml
 type: custom:openwebif-control-card
-title: TV
-columns: 4
+title: TV Guide
+rows: 8
+hours: 3
 ```
 
 ### Options
@@ -75,11 +79,14 @@ columns: 4
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | `type` | string | — | `custom:openwebif-control-card` (required) |
-| `title` | string | `TV` | Card heading |
-| `columns` | number | `4` | Number of channel columns in the grid |
-| `show_search` | bool | `true` | Show the channel search box |
-| `channels_entity` | string | auto | Override the `*_channels` sensor (auto-detected by default) |
+| `title` | string | `TV Guide` | Card heading |
+| `rows` | number | `8` | Number of channel rows visible before scrolling |
+| `hours` | number | `3` | Hours of the timeline visible per screen |
+| `slot_minutes` | number | `30` | Time-tick granularity on the header |
+| `channels_entity` | string | auto | Override the `*_channels` sensor (auto-detected) |
 | `current_entity` | string | auto | Override the `*_current_programme` sensor used to highlight the tuned channel |
+
+> **Requires integration v0.2.0+** for the `get_epg` service and `bouquet_refs`.
 
 ### Theming overrides
 
