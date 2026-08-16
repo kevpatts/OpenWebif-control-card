@@ -14,6 +14,8 @@ The integration provides the data and control entities; this card renders a
 > across the top. Tap a programme to watch or record. Recordings gallery is
 > planned for a later release.
 
+![OpenWebif Control Card — timeline EPG grid](images/screenshot.png)
+
 ---
 
 ## Features
