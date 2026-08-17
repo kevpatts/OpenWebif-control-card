@@ -110,6 +110,10 @@ export class OpenWebifControlCard extends LitElement {
     return (this._config?.rows || 8) + 2;
   }
 
+  // Signatures of the entities we actually care about, so we can ignore the
+  // constant stream of unrelated hass updates HA pushes.
+  private _lastSig = "";
+
   connectedCallback(): void {
     super.connectedCallback();
     this._favs = loadFavourites();
@@ -118,19 +122,70 @@ export class OpenWebifControlCard extends LitElement {
     this._windowStart = now - (now % (30 * 60));
   }
 
+  private _relevantSig(): string {
+    // Build a cheap signature from only the entities/state this card renders,
+    // so re-renders happen only when something we display actually changed.
+    const chId = this._channelsEntityId();
+    const curId = this._currentEntityId();
+    const recId = this._recordingsEntityId();
+    const ch = chId ? this.hass.states[chId] : undefined;
+    const cur = curId ? this.hass.states[curId] : undefined;
+    const rec = recId ? this.hass.states[recId] : undefined;
+    return [
+      ch?.state,
+      (ch?.attributes.channels as unknown[] | undefined)?.length,
+      cur?.attributes.service_reference,
+      rec?.state,
+      this._bouquet,
+      this._loadingEpg ? "L" : "",
+      this._epg.size,
+      this._selected ? `${this._selected.sref}:${this._selected.begin}` : "",
+      !!this.hass.themes?.darkMode,
+    ].join("|");
+  }
+
+  protected shouldUpdate(changed: PropertyValues): boolean {
+    if (changed.has("_config")) return true;
+    // Local UI state always re-renders.
+    if (
+      changed.has("_bouquet") ||
+      changed.has("_selected") ||
+      changed.has("_epg") ||
+      changed.has("_loadingEpg") ||
+      changed.has("_favs") ||
+      changed.has("_windowStart")
+    ) {
+      this._lastSig = this._relevantSig();
+      return true;
+    }
+    // hass changed: only re-render if a relevant entity changed.
+    if (changed.has("hass")) {
+      const sig = this._relevantSig();
+      if (sig === this._lastSig) return false;
+      this._lastSig = sig;
+      return true;
+    }
+    return true;
+  }
+
+  protected willUpdate(_changed: PropertyValues): void {
+    // Pick a sensible default bouquet once, off the render path.
+    if (!this._bouquetInitialised && this.hass && this._allChannels().length) {
+      this._ensureDefaultBouquet();
+    }
+  }
+
   protected updated(changed: PropertyValues): void {
-    // Only (re)load EPG when the selected bouquet changes or on first data,
-    // NOT on every hass state push (which happens constantly). This prevents
-    // flooding the receiver with EPG requests.
+    // Load EPG only when the selected bouquet changes, or the first time we
+    // have channel data. Never on routine hass pushes.
     if (changed.has("_bouquet")) {
       this._loadEpg();
-      return;
-    }
-    if (changed.has("hass")) {
-      // First time we have channel data, kick a single load.
-      if (!this._epgBouquetLoaded && this._allChannels().length) {
-        this._loadEpg();
-      }
+    } else if (
+      !this._epgBouquetLoaded &&
+      this._bouquet &&
+      this._allChannels().length
+    ) {
+      this._loadEpg();
     }
   }
 
@@ -190,10 +245,14 @@ export class OpenWebifControlCard extends LitElement {
     return id ? this.hass.states[id]?.attributes?.service_reference : undefined;
   }
 
-  private _recordings(): Recording[] {
-    const id = Object.keys(this.hass.states).find(
+  private _recordingsEntityId(): string | undefined {
+    return Object.keys(this.hass.states).find(
       (i) => i.startsWith("sensor.") && i.endsWith("_recordings")
     );
+  }
+
+  private _recordings(): Recording[] {
+    const id = this._recordingsEntityId();
     if (!id || !this.hass.states[id]) return [];
     return (this.hass.states[id].attributes.recordings as Recording[]) || [];
   }
@@ -354,7 +413,6 @@ export class OpenWebifControlCard extends LitElement {
       >`;
     }
 
-    this._ensureDefaultBouquet();
     const channels = this._visibleChannels();
     const dark = !!this.hass.themes?.darkMode;
     const currentSref = this._currentSref();
@@ -495,34 +553,99 @@ export class OpenWebifControlCard extends LitElement {
     `;
   }
 
+  private _parseLength(length: string | undefined): number {
+    // "mm:ss" or "h:mm:ss" -> total seconds. Returns 0 if unknown.
+    if (!length) return 0;
+    const parts = length.split(":").map((p) => parseInt(p, 10));
+    if (parts.some((n) => isNaN(n))) return 0;
+    if (parts.length === 2) return parts[0] * 60 + parts[1];
+    if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+    return 0;
+  }
+
+  private _fmtDuration(totalSec: number): string {
+    if (!totalSec) return "";
+    const h = Math.floor(totalSec / 3600);
+    const m = Math.floor((totalSec % 3600) / 60);
+    const s = totalSec % 60;
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return h ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+  }
+
+  private async _playRecording(
+    r: Recording,
+    percent?: number
+  ): Promise<void> {
+    if (!r.serviceref) return;
+    try {
+      await this.hass.callService(DOMAIN, "play_recording", {
+        service_reference: r.serviceref,
+        ...(percent != null ? { position_percent: Math.round(percent) } : {}),
+      });
+    } catch (err) {
+      console.error("openwebif-control-card: play_recording failed", err);
+    }
+  }
+
+  private _scrubPct(e: MouseEvent): number {
+    const bar = e.currentTarget as HTMLElement;
+    const rect = bar.getBoundingClientRect();
+    return Math.max(
+      0,
+      Math.min(100, ((e.clientX - rect.left) / rect.width) * 100)
+    );
+  }
+
+  private _onScrubberMove(e: MouseEvent): void {
+    const bar = e.currentTarget as HTMLElement;
+    const fill = bar.querySelector(".rec-scrub-fill") as HTMLElement | null;
+    if (fill) fill.style.width = `${this._scrubPct(e)}%`;
+  }
+
+  private _onScrubberClick(e: MouseEvent, r: Recording): void {
+    this._playRecording(r, this._scrubPct(e));
+  }
+
   private _renderRecordings() {
     const recs = this._recordings();
     if (!recs.length) {
       return html`<div class="empty">No recordings found.</div>`;
     }
     return html`
-      <div class="rec-grid">
-        ${recs.map(
-          (r: Recording) => html`<div class="rec-card">
-            <div class="rec-title" title=${r.name || ""}>${r.name}</div>
-            <div class="rec-meta">
-              ${[r.channel, r.begin, r.length, r.size]
-                .filter(Boolean)
-                .join(" · ")}
+      <div class="rec-list">
+        ${recs.map((r: Recording) => {
+          const dur = this._parseLength(r.length);
+          return html`<div class="rec-row">
+            <div class="rec-info">
+              <div class="rec-title" title=${r.name || ""}>${r.name}</div>
+              <div class="rec-meta">
+                ${[r.channel, r.begin, r.size].filter(Boolean).join(" · ")}
+              </div>
+              ${r.description
+                ? html`<div class="rec-desc">${r.description}</div>`
+                : nothing}
             </div>
-            ${r.description
-              ? html`<div class="rec-desc">${r.description}</div>`
-              : nothing}
-            <div class="rec-actions">
+            <div class="rec-scrub-wrap">
               <button
-                @click=${() => r.serviceref && this._zap(r.serviceref)}
+                class="rec-play"
+                title="Play from start"
+                @click=${() => this._playRecording(r, 0)}
                 ?disabled=${!r.serviceref}
               >
-                ▶ Play on TV
+                ▶
               </button>
+              <div
+                class="rec-scrubber"
+                title="Click to start playback from that point"
+                @mousemove=${(e: MouseEvent) => this._onScrubberMove(e)}
+                @click=${(e: MouseEvent) => this._onScrubberClick(e, r)}
+              >
+                <div class="rec-scrub-fill"></div>
+                <div class="rec-scrub-dur">${this._fmtDuration(dur)}</div>
+              </div>
             </div>
-          </div>`
-        )}
+          </div>`;
+        })}
       </div>
     `;
   }
@@ -925,27 +1048,29 @@ export class OpenWebifControlCard extends LitElement {
       text-align: center;
       color: var(--owc-subtle);
     }
-    .rec-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    .rec-list {
+      display: flex;
+      flex-direction: column;
       gap: 10px;
       padding: 4px 2px;
     }
-    .rec-card {
+    .rec-row {
       border: 1px solid var(--owc-border);
       border-radius: var(--owc-radius);
       background: var(--owc-tile-bg);
-      padding: 12px;
+      padding: 12px 14px;
       display: flex;
       flex-direction: column;
-      gap: 6px;
+      gap: 10px;
+    }
+    .rec-info {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
     }
     .rec-title {
       font-weight: 600;
       color: var(--owc-text);
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
     }
     .rec-meta {
       font-size: 0.72rem;
@@ -955,27 +1080,68 @@ export class OpenWebifControlCard extends LitElement {
       font-size: 0.8rem;
       color: var(--owc-subtle);
       display: -webkit-box;
-      -webkit-line-clamp: 3;
+      -webkit-line-clamp: 2;
       -webkit-box-orient: vertical;
       overflow: hidden;
     }
-    .rec-actions {
-      margin-top: auto;
+    .rec-scrub-wrap {
       display: flex;
-      gap: 8px;
+      align-items: stretch;
+      gap: 10px;
     }
-    .rec-actions button {
-      padding: 6px 14px;
-      border-radius: 999px;
+    .rec-play {
+      flex: 0 0 auto;
+      width: 38px;
+      border-radius: 8px;
       border: none;
       background: var(--owc-accent);
       color: var(--text-primary-color, #fff);
       cursor: pointer;
-      font-size: 0.8rem;
+      font-size: 0.9rem;
     }
-    .rec-actions button[disabled] {
+    .rec-play[disabled] {
       opacity: 0.5;
       cursor: default;
+    }
+    /* The scrubber represents the original recorded timeline. Click anywhere
+       to start playback from roughly that point. */
+    .rec-scrubber {
+      position: relative;
+      flex: 1;
+      height: 38px;
+      border-radius: 8px;
+      background: linear-gradient(
+        var(--owc-border),
+        var(--owc-border)
+      );
+      background-color: rgba(127, 127, 127, 0.12);
+      cursor: pointer;
+      overflow: hidden;
+      border: 1px solid var(--owc-border);
+    }
+    .rec-scrubber:hover .rec-scrub-fill {
+      opacity: 0.35;
+    }
+    .rec-scrub-fill {
+      position: absolute;
+      top: 0;
+      left: 0;
+      bottom: 0;
+      width: 0;
+      background: var(--owc-accent);
+      opacity: 0;
+      transition: opacity 0.12s ease;
+    }
+    .rec-scrubber:hover::after {
+      /* subtle progress preview handled by fill; keep marker simple */
+    }
+    .rec-scrub-dur {
+      position: absolute;
+      right: 8px;
+      bottom: 4px;
+      font-size: 0.7rem;
+      color: var(--owc-subtle);
+      pointer-events: none;
     }
     a {
       color: var(--owc-accent);
