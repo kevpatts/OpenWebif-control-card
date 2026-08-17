@@ -359,6 +359,15 @@ export class OpenWebifControlCard extends LitElement {
     // No EPG needed on the recordings tab.
     if (this._bouquet === "__rec__") return;
 
+    // Never load EPG for a mega "All channels"/"Last Scanned" bucket — the
+    // payload is huge and would freeze the page. Show the channel list only.
+    if (this._bouquet && this._isMegaBouquet(this._bouquet)) {
+      this._epg = new Map();
+      this._epgBouquetLoaded = "";
+      this._loadingEpg = false;
+      return;
+    }
+
     const refs = this._epgBouquetRefs();
     if (!refs.length) {
       this._epg = new Map();
@@ -459,6 +468,13 @@ export class OpenWebifControlCard extends LitElement {
     return refs[name] ? [refs[name]] : [];
   }
 
+  // "Mega" buckets that are unusable as a grid and carry enormous EPG payloads
+  // (a single 1000-channel bouquet = tens of thousands of events / many MB,
+  // which freezes the page). We never auto-load or pre-fetch these.
+  private _isMegaBouquet(name: string): boolean {
+    return /all channels|last scanned/i.test(name);
+  }
+
   // Kick off a one-time, throttled warm of every category bouquet's EPG so
   // switching tabs is instant. Runs off the render path, one bouquet at a
   // time with a gap between calls so the box stays responsive (heavy bouquets
@@ -480,11 +496,15 @@ export class OpenWebifControlCard extends LitElement {
     if (this._prefetching) return;
     this._prefetching = true;
     try {
-      // Warm exactly the tabs the user can switch to (the same list the tab
-      // bar shows) so every switch is instant. We only warm bouquets that
-      // actually have an EPG ref; the active-tab loader already loads these
-      // the same way, so pre-fetching them adds no extra per-switch cost.
-      const names = this._bouquets().filter((n) => this._refsForBouquet(n).length);
+      // Warm the tabs the user can switch to so every switch is instant. Only
+      // bouquets that have an EPG ref, and never the huge "All channels" /
+      // "Last Scanned" buckets — those can be 1000+ channels / tens of
+      // thousands of events (many MB) and would freeze the page. The
+      // integration tags channels with category bouquets, so real category
+      // tabs are always available to warm.
+      const names = this._bouquets().filter(
+        (n) => this._refsForBouquet(n).length && !this._isMegaBouquet(n)
+      );
       const ordered = this._bouquet && names.includes(this._bouquet)
         ? [this._bouquet, ...names.filter((n) => n !== this._bouquet)]
         : names;
@@ -1503,7 +1523,7 @@ export class OpenWebifControlCard extends LitElement {
 });
 
 console.info(
-  "%c OPENWEBIF-CONTROL-CARD %c v0.8.0 ",
+  "%c OPENWEBIF-CONTROL-CARD %c v0.8.1 ",
   "background:#03a9f4;color:#fff;border-radius:3px 0 0 3px;padding:2px 4px",
   "background:#333;color:#fff;border-radius:0 3px 3px 0;padding:2px 4px"
 );
