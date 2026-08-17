@@ -1,7 +1,14 @@
 import { LitElement, html, css, nothing, PropertyValues } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
-import { piconUrls, cachedResolved, rememberResolved } from "./picon";
+import {
+  piconUrls,
+  cachedResolved,
+  rememberResolved,
+  markFailed,
+  hasFailed,
+} from "./picon";
 import { loadFavourites, toggleFavourite } from "./favourites";
+import "./editor";
 
 interface Channel {
   name: string;
@@ -85,6 +92,7 @@ export class OpenWebifControlCard extends LitElement {
   @state() private _windowStart = 0; // unix seconds, left edge of timeline
 
   private _epgBouquetLoaded = "";
+  private _epgLoadingKey = "";
   // Cache of grouped EPG per bouquet-key, with a fetch timestamp, so switching
   // tabs back and forth is instant and doesn't re-hit the box.
   private _epgCache: Map<
@@ -104,6 +112,15 @@ export class OpenWebifControlCard extends LitElement {
       title: "TV Guide",
       ...config,
     };
+  }
+
+  // Home Assistant visual editor hooks.
+  public static getConfigElement(): HTMLElement {
+    return document.createElement("openwebif-control-card-editor");
+  }
+
+  public static getStubConfig(): CardConfig {
+    return { type: "custom:openwebif-control-card", title: "TV Guide" };
   }
 
   public getCardSize(): number {
@@ -177,12 +194,14 @@ export class OpenWebifControlCard extends LitElement {
 
   protected updated(changed: PropertyValues): void {
     // Load EPG only when the selected bouquet changes, or the first time we
-    // have channel data. Never on routine hass pushes.
+    // have channel data. Never on routine hass pushes. _loadEpg itself serves
+    // from cache instantly when possible, so tab switches don't re-fetch.
     if (changed.has("_bouquet")) {
       this._loadEpg();
     } else if (
       !this._epgBouquetLoaded &&
       this._bouquet &&
+      this._bouquet !== "__rec__" &&
       this._allChannels().length
     ) {
       this._loadEpg();
@@ -290,21 +309,36 @@ export class OpenWebifControlCard extends LitElement {
   }
 
   private async _loadEpg(): Promise<void> {
+    // No EPG needed on the recordings tab.
+    if (this._bouquet === "__rec__") return;
+
     const refs = this._epgBouquetRefs();
-    if (!refs.length || this._loadingEpg) return;
+    if (!refs.length) {
+      this._epg = new Map();
+      this._epgBouquetLoaded = "";
+      this._loadingEpg = false;
+      return;
+    }
     const key = refs.join("|");
 
-    // Serve from cache if fresh.
+    // Serve from cache if fresh — instant, no network, no spinner.
     const cached = this._epgCache.get(key);
     if (cached && Date.now() - cached.at < OpenWebifControlCard.EPG_TTL_MS) {
       this._epg = cached.data;
       this._epgBouquetLoaded = key;
+      this._loadingEpg = false;
       return;
     }
-    if (key === this._epgBouquetLoaded && this._epg.size) return;
+
+    // Already showing this key's data and not stale? Nothing to do.
+    if (key === this._epgBouquetLoaded && this._epg.size && !this._loadingEpg) {
+      return;
+    }
+    // A load for this key is already in flight.
+    if (this._loadingEpg && this._epgLoadingKey === key) return;
 
     this._loadingEpg = true;
-    this._epgBouquetLoaded = key;
+    this._epgLoadingKey = key;
     try {
       const map = new Map<string, EpgEvent[]>();
       // Fetch category bouquets in parallel; merge (dedupe by sref+begin).
@@ -340,11 +374,13 @@ export class OpenWebifControlCard extends LitElement {
       }
       for (const arr of map.values()) arr.sort((a, b) => a.begin - b.begin);
       this._epg = map;
+      this._epgBouquetLoaded = key;
       this._epgCache.set(key, { at: Date.now(), data: map });
     } catch (err) {
       console.error("openwebif-control-card: get_epg failed", err);
     } finally {
       this._loadingEpg = false;
+      this._epgLoadingKey = "";
     }
   }
 
@@ -383,13 +419,20 @@ export class OpenWebifControlCard extends LitElement {
     if (img.src) rememberResolved(name, img.src);
   }
 
-  private _onPiconError(e: Event, urls: string[], idx: number): void {
+  private _onPiconError(
+    e: Event,
+    name: string,
+    urls: string[],
+    idx: number
+  ): void {
     const img = e.target as HTMLImageElement;
     if (idx + 1 < urls.length) {
       img.dataset.idx = String(idx + 1);
       img.src = urls[idx + 1];
     } else {
-      // All candidates failed: hide the img for good and show the text tile.
+      // All candidates failed: remember this permanently so we never request
+      // these URLs again on future re-renders (stops the 404 loop).
+      markFailed(name);
       img.classList.add("failed");
       const logo = img.parentElement;
       if (logo) logo.classList.add("no-picon");
@@ -656,7 +699,10 @@ export class OpenWebifControlCard extends LitElement {
     active: boolean,
     windowWidth: number
   ) {
-    const urls = piconUrls(channel.name, dark);
+    // If we already know this channel has no logo, skip the <img> entirely and
+    // render the text tile — no repeated 404 requests on re-render.
+    const failed = hasFailed(channel.name);
+    const urls = failed ? [] : piconUrls(channel.name, dark);
     const known = cachedResolved(channel.name);
     const startUrls = known
       ? [known, ...urls.filter((u) => u !== known)]
@@ -683,7 +729,8 @@ export class OpenWebifControlCard extends LitElement {
                   decoding="async"
                   alt=""
                   @load=${(e: Event) => this._onPiconLoad(e, channel.name)}
-                  @error=${(e: Event) => this._onPiconError(e, startUrls, 0)}
+                  @error=${(e: Event) =>
+                    this._onPiconError(e, channel.name, startUrls, 0)}
                 />`
               : nothing}
             <span class="chan-fallback">${channel.name}</span>

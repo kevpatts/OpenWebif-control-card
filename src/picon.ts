@@ -23,6 +23,9 @@ const MAP = piconMap as Record<string, string>;
 // cache of which URL actually loaded, logos become instant after first paint.
 const urlCache = new Map<string, string[]>();
 const resolvedCache = new Map<string, string>();
+// Channels whose logos we've already determined don't exist, so we never
+// request them again (prevents endless ret/looping 404s across re-renders).
+const failedNames = new Set<string>();
 
 /** Record the URL that successfully loaded for a channel (called by the card). */
 export function rememberResolved(name: string, url: string): void {
@@ -32,6 +35,16 @@ export function rememberResolved(name: string, url: string): void {
 /** Return the previously-successful URL for a channel, if known. */
 export function cachedResolved(name: string): string | undefined {
   return resolvedCache.get(name);
+}
+
+/** Mark a channel as having no working logo (all candidates 404'd). */
+export function markFailed(name: string): void {
+  failedNames.add(name);
+}
+
+/** Whether we already know this channel has no logo. */
+export function hasFailed(name: string): boolean {
+  return failedNames.has(name);
 }
 
 export function normaliseName(name: string): string {
