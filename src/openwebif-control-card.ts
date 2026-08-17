@@ -6,6 +6,7 @@ import {
   rememberResolved,
   markFailed,
   hasFailed,
+  markUrlFailed,
 } from "./picon";
 import { loadFavourites, toggleFavourite } from "./favourites";
 import "./editor";
@@ -426,12 +427,14 @@ export class OpenWebifControlCard extends LitElement {
     idx: number
   ): void {
     const img = e.target as HTMLImageElement;
+    // Remember this specific URL is broken so it's never offered again.
+    if (urls[idx]) markUrlFailed(urls[idx]);
     if (idx + 1 < urls.length) {
       img.dataset.idx = String(idx + 1);
       img.src = urls[idx + 1];
     } else {
-      // All candidates failed: remember this permanently so we never request
-      // these URLs again on future re-renders (stops the 404 loop).
+      // All candidates failed: remember this channel permanently so we never
+      // request its SVGs again on future re-renders (stops the 404 loop).
       markFailed(name);
       img.classList.add("failed");
       const logo = img.parentElement;

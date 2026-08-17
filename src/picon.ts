@@ -21,11 +21,17 @@ const MAP = piconMap as Record<string, string>;
 // Cache of channel-name -> ordered candidate URLs, so repeated renders (e.g.
 // switching tabs) never recompute or re-request. Combined with a module-level
 // cache of which URL actually loaded, logos become instant after first paint.
-const urlCache = new Map<string, string[]>();
 const resolvedCache = new Map<string, string>();
 // Channels whose logos we've already determined don't exist, so we never
 // request them again (prevents endless ret/looping 404s across re-renders).
 const failedNames = new Set<string>();
+// Individual URLs known to 404, filtered out of future candidate lists.
+const failedUrls = new Set<string>();
+
+/** Mark a single URL as broken so it is never offered again. */
+export function markUrlFailed(url: string): void {
+  failedUrls.add(url);
+}
 
 /** Record the URL that successfully loaded for a channel (called by the card). */
 export function rememberResolved(name: string, url: string): void {
@@ -65,6 +71,12 @@ export function resolveLogoId(name: string): string | null {
   const key = normaliseName(name);
   if (!key) return null;
   if (MAP[key]) return MAP[key];
+  // Strip trailing quality suffixes (hd/uhd/fhd) and retry.
+  for (const suf of ["uhd", "fhd", "hd"]) {
+    if (key.endsWith(suf) && MAP[key.slice(0, -suf.length)]) {
+      return MAP[key.slice(0, -suf.length)];
+    }
+  }
   // "+1" timeshift fallback to the base channel.
   if (key.endsWith("plus1") && MAP[key.slice(0, -5)]) {
     return MAP[key.slice(0, -5)];
@@ -78,19 +90,12 @@ export function resolveLogoId(name: string): string | null {
  * Returns an ordered list of candidate URLs to try.
  */
 export function piconUrls(name: string, dark: boolean): string[] {
-  const cacheKey = `${dark ? "d" : "l"}:${name}`;
-  const cached = urlCache.get(cacheKey);
-  if (cached) return cached;
-
   const id = resolveLogoId(name);
-  if (!id) {
-    urlCache.set(cacheKey, []);
-    return [];
-  }
+  if (!id) return [];
   const variants = dark
     ? [".dark.svg", ".default.svg", ".default.png"]
     : [".default.svg", ".light.svg", ".default.png"];
-  const urls = variants.map((v) => `${CDN_BASE}/${id}${v}`);
-  urlCache.set(cacheKey, urls);
-  return urls;
+  const all = variants.map((v) => `${CDN_BASE}/${id}${v}`);
+  // Filter out any variant we already know 404s.
+  return all.filter((u) => !failedUrls.has(u));
 }
