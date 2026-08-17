@@ -91,6 +91,12 @@ export class OpenWebifControlCard extends LitElement {
   @state() private _loadingEpg = false;
   @state() private _selected?: EpgEvent;
   @state() private _windowStart = 0; // unix seconds, left edge of timeline
+  // Vertical scroll offset of the guide, used to virtualise channel rows so a
+  // large bouquet doesn't build hundreds of rows at once (the cause of the
+  // browser "page unresponsive" freeze on tab switch).
+  @state() private _scrollTop = 0;
+  private _guideViewportH = 0;
+  private _scrollRaf = 0;
 
   private _epgBouquetLoaded = "";
   private _epgLoadingKey = "";
@@ -100,6 +106,12 @@ export class OpenWebifControlCard extends LitElement {
     string,
     { at: number; data: Map<string, EpgEvent[]> }
   > = new Map();
+  // Background pre-fetch state: we warm every tab's EPG on idle so the first
+  // switch to a tab is instant (no spinner, no first-visit fetch). Kept
+  // throttled and single-flight so the box is never hammered.
+  private _prefetchStarted = false;
+  private _prefetching = false;
+  private _prefetchTimer: number | null = null;
   // How long the card keeps its own EPG copy before asking the integration
   // again. The integration serves from a background-refreshed cache, so this
   // can be generous; the box is not hit on cache hits either side.
@@ -141,6 +153,14 @@ export class OpenWebifControlCard extends LitElement {
     this._windowStart = now - (now % (30 * 60));
   }
 
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+    if (this._prefetchTimer != null) {
+      window.clearTimeout(this._prefetchTimer);
+      this._prefetchTimer = null;
+    }
+  }
+
   private _relevantSig(): string {
     // Build a cheap signature from only the entities/state this card renders,
     // so re-renders happen only when something we display actually changed.
@@ -159,6 +179,7 @@ export class OpenWebifControlCard extends LitElement {
       this._loadingEpg ? "L" : "",
       this._epg.size,
       this._selected ? `${this._selected.sref}:${this._selected.begin}` : "",
+      this._isStandby(),
       !!this.hass.themes?.darkMode,
     ].join("|");
   }
@@ -172,7 +193,8 @@ export class OpenWebifControlCard extends LitElement {
       changed.has("_epg") ||
       changed.has("_loadingEpg") ||
       changed.has("_favs") ||
-      changed.has("_windowStart")
+      changed.has("_windowStart") ||
+      changed.has("_scrollTop")
     ) {
       this._lastSig = this._relevantSig();
       return true;
@@ -199,6 +221,11 @@ export class OpenWebifControlCard extends LitElement {
     // have channel data. Never on routine hass pushes. _loadEpg itself serves
     // from cache instantly when possible, so tab switches don't re-fetch.
     if (changed.has("_bouquet")) {
+      // New tab: reset the virtual-scroll position and the scroll container
+      // itself, so a shorter list doesn't start scrolled off the top.
+      this._scrollTop = 0;
+      const guide = this.renderRoot?.querySelector(".guide") as HTMLElement | null;
+      if (guide) guide.scrollTop = 0;
       this._loadEpg();
     } else if (
       !this._epgBouquetLoaded &&
@@ -207,6 +234,11 @@ export class OpenWebifControlCard extends LitElement {
       this._allChannels().length
     ) {
       this._loadEpg();
+    }
+    // Once we have channel/bouquet data, warm every tab's EPG in the
+    // background so switching is instant. One-shot; internally throttled.
+    if (!this._prefetchStarted && this.hass && this._bouquets().length) {
+      this._startPrefetch();
     }
   }
 
@@ -266,6 +298,19 @@ export class OpenWebifControlCard extends LitElement {
     return id ? this.hass.states[id]?.attributes?.service_reference : undefined;
   }
 
+  // Best-effort standby state from the integration's standby binary_sensor,
+  // used only to light up the power button. Returns undefined if not found.
+  private _isStandby(): boolean | undefined {
+    const id = Object.keys(this.hass.states).find(
+      (i) => i.startsWith("binary_sensor.") && i.endsWith("_standby")
+    );
+    if (!id) return undefined;
+    const st = this.hass.states[id]?.state;
+    if (st === "on") return true;
+    if (st === "off") return false;
+    return undefined;
+  }
+
   private _recordingsEntityId(): string | undefined {
     return Object.keys(this.hass.states).find(
       (i) => i.startsWith("sensor.") && i.endsWith("_recordings")
@@ -323,7 +368,8 @@ export class OpenWebifControlCard extends LitElement {
     }
     const key = refs.join("|");
 
-    // Serve from cache if fresh — instant, no network, no spinner.
+    // Serve from cache if fresh — instant, no network, no spinner. This is the
+    // path a tab switch takes once the background pre-fetch has warmed it.
     const cached = this._epgCache.get(key);
     if (cached && Date.now() - cached.at < OpenWebifControlCard.EPG_TTL_MS) {
       this._epg = cached.data;
@@ -342,49 +388,135 @@ export class OpenWebifControlCard extends LitElement {
     this._loadingEpg = true;
     this._epgLoadingKey = key;
     try {
-      const map = new Map<string, EpgEvent[]>();
-      // Fetch category bouquets in parallel; merge (dedupe by sref+begin).
-      const results = await Promise.all(
-        refs.map((ref) =>
-          this.hass
-            .callService(
-              DOMAIN,
-              "get_epg",
-              // Ask for a wide window (5h) so scrolling forward stays populated;
-              // the integration caches and windows this server-side.
-              { bouquet_reference: ref, hours: 5 },
-              undefined,
-              false,
-              true
-            )
-            .catch(() => undefined)
-        )
-      );
-      const seen = new Set<string>();
-      for (const resp of results) {
-        const events: EpgEvent[] = resp?.response?.events || resp?.events || [];
-        for (const e of events) {
-          if (!e.sref) continue;
-          const k = `${e.sref}:${e.begin}`;
-          if (seen.has(k)) continue;
-          seen.add(k);
-          // Decode HTML entities in display text up front.
-          e.title = decodeHtml(e.title);
-          if (e.shortdesc) e.shortdesc = decodeHtml(e.shortdesc);
-          const arr = map.get(e.sref) || [];
-          arr.push(e);
-          map.set(e.sref, arr);
-        }
+      const map = await this._fetchEpg(refs, key);
+      if (map) {
+        this._epg = map;
+        this._epgBouquetLoaded = key;
       }
-      for (const arr of map.values()) arr.sort((a, b) => a.begin - b.begin);
-      this._epg = map;
-      this._epgBouquetLoaded = key;
-      this._epgCache.set(key, { at: Date.now(), data: map });
     } catch (err) {
       console.error("openwebif-control-card: get_epg failed", err);
     } finally {
       this._loadingEpg = false;
       this._epgLoadingKey = "";
+    }
+  }
+
+  // Fetch + group + cache EPG for a set of bouquet refs. Shared by the active
+  // tab loader and the background pre-fetcher. Serves from cache when fresh so
+  // the box is never hit twice for the same warm key.
+  private async _fetchEpg(
+    refs: string[],
+    key: string
+  ): Promise<Map<string, EpgEvent[]> | null> {
+    const cached = this._epgCache.get(key);
+    if (cached && Date.now() - cached.at < OpenWebifControlCard.EPG_TTL_MS) {
+      return cached.data;
+    }
+    const map = new Map<string, EpgEvent[]>();
+    // Fetch category bouquets in parallel; merge (dedupe by sref+begin).
+    const results = await Promise.all(
+      refs.map((ref) =>
+        this.hass
+          .callService(
+            DOMAIN,
+            "get_epg",
+            // Ask for a wide window (5h) so scrolling forward stays populated;
+            // the integration caches and windows this server-side.
+            { bouquet_reference: ref, hours: 5 },
+            undefined,
+            false,
+            true
+          )
+          .catch(() => undefined)
+      )
+    );
+    const seen = new Set<string>();
+    for (const resp of results) {
+      const events: EpgEvent[] = resp?.response?.events || resp?.events || [];
+      for (const e of events) {
+        if (!e.sref) continue;
+        const k = `${e.sref}:${e.begin}`;
+        if (seen.has(k)) continue;
+        seen.add(k);
+        // Decode HTML entities in display text up front.
+        e.title = decodeHtml(e.title);
+        if (e.shortdesc) e.shortdesc = decodeHtml(e.shortdesc);
+        const arr = map.get(e.sref) || [];
+        arr.push(e);
+        map.set(e.sref, arr);
+      }
+    }
+    for (const arr of map.values()) arr.sort((a, b) => a.begin - b.begin);
+    this._epgCache.set(key, { at: Date.now(), data: map });
+    return map;
+  }
+
+  // ---- background pre-fetch (warm every tab) -----------------------------
+
+  // Map a bouquet name to the refs the EPG loader would use for that tab.
+  private _refsForBouquet(name: string): string[] {
+    const refs = this._bouquetRefs();
+    return refs[name] ? [refs[name]] : [];
+  }
+
+  // Kick off a one-time, throttled warm of every category bouquet's EPG so
+  // switching tabs is instant. Runs off the render path, one bouquet at a
+  // time with a gap between calls so the box stays responsive (heavy bouquets
+  // like Entertainment can take several seconds server-side).
+  private _startPrefetch(): void {
+    if (this._prefetchStarted) return;
+    this._prefetchStarted = true;
+    const schedule = (cb: () => void) => {
+      const ric = (window as any).requestIdleCallback as
+        | ((cb: () => void, opts?: any) => number)
+        | undefined;
+      if (ric) ric(cb, { timeout: 3000 });
+      else window.setTimeout(cb, 500);
+    };
+    schedule(() => this._prefetchNext());
+  }
+
+  private async _prefetchNext(): Promise<void> {
+    if (this._prefetching) return;
+    this._prefetching = true;
+    try {
+      // Warm the active tab first, then the rest — skip the huge
+      // "All channels" bouquets, which are too heavy to grid as an EPG source.
+      const names = this._bouquets().filter(
+        (n) => !/all channels/i.test(n) && !/last scanned/i.test(n)
+      );
+      const ordered = this._bouquet && names.includes(this._bouquet)
+        ? [this._bouquet, ...names.filter((n) => n !== this._bouquet)]
+        : names;
+      for (const name of ordered) {
+        const refs = this._refsForBouquet(name);
+        if (!refs.length) continue;
+        const key = refs.join("|");
+        const cached = this._epgCache.get(key);
+        if (cached && Date.now() - cached.at < OpenWebifControlCard.EPG_TTL_MS) {
+          continue; // already warm
+        }
+        try {
+          const map = await this._fetchEpg(refs, key);
+          // If this bouquet is the one on screen and we weren't showing data
+          // yet, adopt it so the guide fills in without a manual switch.
+          if (
+            map &&
+            name === this._bouquet &&
+            this._epgBouquetLoaded !== key
+          ) {
+            this._epg = map;
+            this._epgBouquetLoaded = key;
+            this._loadingEpg = false;
+          }
+        } catch (err) {
+          console.warn("openwebif-control-card: prefetch failed for", name, err);
+        }
+        // Gentle gap between bouquets so we never flood the receiver.
+        await new Promise((r) => window.setTimeout(r, 1200));
+      }
+    } finally {
+      this._prefetching = false;
     }
   }
 
@@ -395,6 +527,24 @@ export class OpenWebifControlCard extends LitElement {
       await this.hass.callService(DOMAIN, "zap", { service_reference: sref });
     } catch (err) {
       console.error("openwebif-control-card: zap failed", err);
+    }
+  }
+
+  // ---- header controls (power + standard remote keys) --------------------
+
+  private async _toggleStandby(): Promise<void> {
+    try {
+      await this.hass.callService(DOMAIN, "toggle_standby", {});
+    } catch (err) {
+      console.error("openwebif-control-card: toggle_standby failed", err);
+    }
+  }
+
+  private async _key(command: number): Promise<void> {
+    try {
+      await this.hass.callService(DOMAIN, "remote_control", { command });
+    } catch (err) {
+      console.error("openwebif-control-card: remote_control failed", err);
     }
   }
 
@@ -477,7 +627,10 @@ export class OpenWebifControlCard extends LitElement {
     return html`
       <ha-card>
         <div class="topbar">
-          <div class="title">${this._config.title}</div>
+          <div class="heading">
+            <div class="title">${this._config.title}</div>
+            ${this._renderControls()}
+          </div>
           <div class="tabs">
             <button
               class="tab ${this._bouquet === "__fav__" ? "active" : ""}"
@@ -522,6 +675,63 @@ export class OpenWebifControlCard extends LitElement {
     `;
   }
 
+  // Standard TV controls shown beside the heading. Enigma2 remote key codes:
+  // MUTE=113, VOL-=114, VOL+=115, CH+=402, CH-=403, INFO=358. Power uses the
+  // toggle_standby service (cleaner than KEY_POWER, which can deep-power-off).
+  private _renderControls() {
+    const standby = this._isStandby();
+    return html`
+      <div class="controls" role="group" aria-label="Receiver controls">
+        <button
+          class="ctrl power ${standby === true ? "off" : standby === false ? "on" : ""}"
+          @click=${() => this._toggleStandby()}
+          title=${standby === true
+            ? "Power on (wake from standby)"
+            : standby === false
+            ? "Power off (standby)"
+            : "Toggle standby"}
+        >
+          ⏻
+        </button>
+        <span class="ctrl-sep"></span>
+        <button class="ctrl" @click=${() => this._key(403)} title="Channel down">
+          CH–
+        </button>
+        <button class="ctrl" @click=${() => this._key(402)} title="Channel up">
+          CH+
+        </button>
+        <span class="ctrl-sep"></span>
+        <button class="ctrl" @click=${() => this._key(114)} title="Volume down">
+          🔉
+        </button>
+        <button class="ctrl" @click=${() => this._key(113)} title="Mute">
+          🔇
+        </button>
+        <button class="ctrl" @click=${() => this._key(115)} title="Volume up">
+          🔊
+        </button>
+        <span class="ctrl-sep"></span>
+        <button class="ctrl" @click=${() => this._key(358)} title="Info">
+          ℹ︎
+        </button>
+      </div>
+    `;
+  }
+
+  // Throttle scroll -> state via rAF so we virtualise without thrashing.
+  private _onGuideScroll(e: Event): void {
+    const el = e.currentTarget as HTMLElement;
+    if (this._scrollRaf) return;
+    this._scrollRaf = window.requestAnimationFrame(() => {
+      this._scrollRaf = 0;
+      this._guideViewportH = el.clientHeight;
+      // Only update if it moved by at least half a row, to limit re-renders.
+      if (Math.abs(el.scrollTop - this._scrollTop) >= ROW_HEIGHT / 2) {
+        this._scrollTop = el.scrollTop;
+      }
+    });
+  }
+
   private _renderGuideBlock(
     channels: Channel[],
     dark: boolean,
@@ -532,6 +742,23 @@ export class OpenWebifControlCard extends LitElement {
     windowWidth: number,
     nowOffsetPx: number
   ) {
+    // ---- row virtualisation ----------------------------------------------
+    // Render only the channel rows near the viewport, with spacer divs top and
+    // bottom so the scrollbar and now-line geometry stay correct. This keeps
+    // the DOM small (a few dozen rows) no matter how large the bouquet is.
+    const total = channels.length;
+    const viewportH = this._guideViewportH || rows * ROW_HEIGHT;
+    const OVERSCAN = 4; // rows of buffer above/below the viewport
+    const first = Math.max(
+      0,
+      Math.floor(this._scrollTop / ROW_HEIGHT) - OVERSCAN
+    );
+    const visibleCount = Math.ceil(viewportH / ROW_HEIGHT) + OVERSCAN * 2;
+    const last = Math.min(total, first + visibleCount);
+    const slice = channels.slice(first, last);
+    const topPad = first * ROW_HEIGHT;
+    const bottomPad = Math.max(0, (total - last) * ROW_HEIGHT);
+
     return html`
         <div class="timeline-controls">
           <button
@@ -563,6 +790,7 @@ export class OpenWebifControlCard extends LitElement {
           style="--rows:${rows}; --row-h:${ROW_HEIGHT}px; max-height:${
             rows * ROW_HEIGHT + 24
           }px"
+          @scroll=${(e: Event) => this._onGuideScroll(e)}
         >
           <!-- one scroll container: header row + channel rows share the same
                horizontal + vertical scroll -->
@@ -575,20 +803,26 @@ export class OpenWebifControlCard extends LitElement {
               </div>
             </div>
 
-            ${channels.length === 0
+            ${total === 0
               ? html`<div class="empty">
                   ${this._bouquet === "__fav__"
                     ? "No favourites yet — tap the ☆ on a channel to add one."
                     : "No channels."}
                 </div>`
-              : html`<div class="rows">
+              : html`<div
+                  class="rows"
+                  style="height:${total * ROW_HEIGHT}px"
+                >
                   ${nowOffsetPx >= 0 && nowOffsetPx <= windowWidth
                     ? html`<div
                         class="nowline"
                         style="left:calc(var(--chan-w) + ${nowOffsetPx}px)"
                       ></div>`
                     : nothing}
-                  ${channels.map((c) =>
+                  <!-- only the rows near the viewport are rendered; spacers
+                       above/below preserve total scroll height -->
+                  ${topPad ? html`<div style="height:${topPad}px"></div>` : nothing}
+                  ${slice.map((c) =>
                     this._renderRow(
                       c,
                       dark,
@@ -596,6 +830,9 @@ export class OpenWebifControlCard extends LitElement {
                       windowWidth
                     )
                   )}
+                  ${bottomPad
+                    ? html`<div style="height:${bottomPad}px"></div>`
+                    : nothing}
                 </div>`}
           </div>
         </div>
@@ -841,10 +1078,63 @@ export class OpenWebifControlCard extends LitElement {
       margin-bottom: 10px;
       flex-wrap: wrap;
     }
+    .heading {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
     .title {
       font-size: 1.2rem;
       font-weight: 600;
       color: var(--owc-text);
+    }
+    .controls {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .ctrl {
+      min-width: 32px;
+      height: 30px;
+      padding: 0 8px;
+      border-radius: 8px;
+      border: 1px solid var(--owc-border);
+      background: var(--owc-tile-bg);
+      color: var(--owc-text);
+      cursor: pointer;
+      font-size: 0.82rem;
+      line-height: 1;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      transition: border-color 0.12s ease, background 0.12s ease,
+        color 0.12s ease;
+    }
+    .ctrl:hover {
+      border-color: var(--owc-accent);
+    }
+    .ctrl:active {
+      background: var(--owc-accent);
+      color: var(--text-primary-color, #fff);
+    }
+    .ctrl.power {
+      font-size: 1rem;
+    }
+    /* Power button colour hint: green ring when on, red when in standby. */
+    .ctrl.power.on {
+      color: #4caf50;
+      border-color: #4caf50;
+    }
+    .ctrl.power.off {
+      color: #f44336;
+      border-color: #f44336;
+    }
+    .ctrl-sep {
+      width: 1px;
+      height: 18px;
+      background: var(--owc-border);
+      margin: 0 2px;
     }
     .tabs {
       display: flex;
@@ -1213,7 +1503,7 @@ export class OpenWebifControlCard extends LitElement {
 });
 
 console.info(
-  "%c OPENWEBIF-CONTROL-CARD %c v0.4.0 ",
+  "%c OPENWEBIF-CONTROL-CARD %c v0.8.0 ",
   "background:#03a9f4;color:#fff;border-radius:3px 0 0 3px;padding:2px 4px",
   "background:#333;color:#fff;border-radius:0 3px 3px 0;padding:2px 4px"
 );

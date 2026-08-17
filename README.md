@@ -10,9 +10,11 @@ This is the **dashboard companion** to the
 The integration provides the data and control entities; this card renders a
 **Sky Q-style channel grid** on top of them.
 
-> **v0.4 — timeline grid.** A Sky Q-style EPG timeline: channels as rows, time
-> across the top. Tap a programme to watch or record. Recordings gallery is
-> planned for a later release.
+> **v0.8 — header controls + instant tabs.** Standard receiver controls
+> (power/standby, channel ±, volume ±, mute, info) sit beside the heading.
+> All bouquet tabs now **pre-load and cache their EPG in the background**, so
+> switching between them is instant. Large bouquets are **virtualised** so the
+> guide no longer freezes the browser on big channel lists.
 
 ![OpenWebif Control Card — timeline EPG grid](images/screenshot.png)
 
@@ -22,6 +24,18 @@ The integration provides the data and control entities; this card renders a
 
 ## Features
 
+- **Header controls** — standard receiver controls sit beside the card
+  heading: **power** (toggle standby; green when on, red in standby),
+  **channel up/down**, **volume up/down**, **mute**, and **info**. They call
+  the integration's `toggle_standby` / `remote_control` services.
+- **Instant tabs (background pre-load + cache)** — every bouquet tab's EPG is
+  fetched and cached in the background shortly after the card loads (throttled,
+  one bouquet at a time so the box stays responsive). Switching tabs is
+  immediate — no first-visit load spinner.
+- **Virtualised guide** — only the channel rows near the viewport are rendered,
+  so even large bouquets (hundreds of channels) never build a huge DOM. This
+  fixes the browser **"page unresponsive"** freeze that could happen when
+  switching to a big tab.
 - **Timeline EPG grid** — channels as rows, time along the top, with a live
   "now" line. Scroll horizontally through the guide; step the window earlier/
   later. Configurable number of visible **rows**.
@@ -51,6 +65,23 @@ The integration provides the data and control entities; this card renders a
    (v0.1.1+) installed and configured — it provides the `*_channels` sensor and
    the `zap` service this card uses.
 2. Home Assistant 2024.1.0 or newer.
+3. **The receiver's resume prompt must be disabled** for recording playback
+   to work without a modal blocking it — see below.
+
+---
+
+## Receiver setup: disable the resume prompt
+
+> **Do this once on the box.** When you start a recording, Enigma2 can pop up a
+> **“Resume from last position?”** dialog. That modal blocks the automated
+> playback/seek this card triggers, so it **must be disabled**. With it off,
+> ▶ Play and the timeline scrubber work cleanly. See the
+> [integration README](https://github.com/kevpatts/OpenWebif-control#receiver-setup-disable-the-resume-prompt)
+> for the full walkthrough. In short, on the box:
+>
+> **Menu → Setup → System → Recording (paths) / Playback →
+> “Ask about resuming a movie” → set to `no`** (exact wording varies by
+> OpenViX / image version; look for the movie *resume* option).
 
 ---
 
