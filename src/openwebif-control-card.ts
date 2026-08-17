@@ -480,11 +480,11 @@ export class OpenWebifControlCard extends LitElement {
     if (this._prefetching) return;
     this._prefetching = true;
     try {
-      // Warm the active tab first, then the rest — skip the huge
-      // "All channels" bouquets, which are too heavy to grid as an EPG source.
-      const names = this._bouquets().filter(
-        (n) => !/all channels/i.test(n) && !/last scanned/i.test(n)
-      );
+      // Warm exactly the tabs the user can switch to (the same list the tab
+      // bar shows) so every switch is instant. We only warm bouquets that
+      // actually have an EPG ref; the active-tab loader already loads these
+      // the same way, so pre-fetching them adds no extra per-switch cost.
+      const names = this._bouquets().filter((n) => this._refsForBouquet(n).length);
       const ordered = this._bouquet && names.includes(this._bouquet)
         ? [this._bouquet, ...names.filter((n) => n !== this._bouquet)]
         : names;
