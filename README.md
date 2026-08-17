@@ -30,9 +30,11 @@ The integration provides the data and control entities; this card renders a
 - **Favourites** — star any channel; a **★ Favourites** tab shows just those.
   Favourites are stored per-browser (localStorage).
 - **Bouquet tabs** along the top (FreeSat categories, Saorview, etc.).
-- **Recordings** — a **📼 Recordings** tab shows a gallery of everything recorded
-  on the box (title, channel, date, length, size, description) with a
-  **Play on TV** action.
+- **Recordings** — a **📼 Recordings** tab lists everything recorded on the box
+  (title, channel, date, size, description). Each has a **timeline scrubber**
+  sized to the original show: click anywhere on it to start playback on the TV
+  from roughly that point, or hit ▶ to play from the start.
+  (Seeking is approximate — it uses the receiver's decile jump keys.)
 - **Channel logos (picons)** resolved automatically from the public
   [`picons/picons`](https://github.com/picons/picons) set via jsDelivr —
   **no picon pack needs to be installed on your box** — cached after first load
