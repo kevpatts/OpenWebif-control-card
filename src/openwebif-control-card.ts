@@ -100,9 +100,10 @@ export class OpenWebifControlCard extends LitElement {
     string,
     { at: number; data: Map<string, EpgEvent[]> }
   > = new Map();
-  // How long a cached EPG stays fresh (ms). EPG windows are short, so a few
-  // minutes keeps it snappy without going stale.
-  private static EPG_TTL_MS = 5 * 60 * 1000;
+  // How long the card keeps its own EPG copy before asking the integration
+  // again. The integration serves from a background-refreshed cache, so this
+  // can be generous; the box is not hit on cache hits either side.
+  private static EPG_TTL_MS = 10 * 60 * 1000;
 
   public setConfig(config: CardConfig): void {
     if (!config) throw new Error("Invalid configuration");
@@ -349,7 +350,9 @@ export class OpenWebifControlCard extends LitElement {
             .callService(
               DOMAIN,
               "get_epg",
-              { bouquet_reference: ref, hours: this._config.hours || 3 },
+              // Ask for a wide window (5h) so scrolling forward stays populated;
+              // the integration caches and windows this server-side.
+              { bouquet_reference: ref, hours: 5 },
               undefined,
               false,
               true

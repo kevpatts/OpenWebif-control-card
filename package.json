@@ -1,6 +1,6 @@
 {
   "name": "openwebif-control-card",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Modern, minimalist, themeable Home Assistant Lovelace card for Enigma2/OpenWebif receivers.",
   "type": "module",
   "main": "dist/openwebif-control-card.js",
